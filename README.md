@@ -1,0 +1,29 @@
+# WebRTC Hub Sample (React + Python/uv)
+
+Python is the central hub:
+- React ↔ Python (DataChannel)
+- .NET ↔ Python (DataChannel)
+
+## Run
+
+### 1) Python hub (uv)
+```bash
+cd server
+uv venv
+uv sync
+uv run webrtc-hub
+```
+
+### 2) React client
+```bash
+cd client
+npm install
+npm run dev
+```
+
+## Test quickly
+- Open two tabs at http://localhost:5173
+- Use different `client_id` values
+- Connect both
+- Use **Send to** or **Broadcast room**
+- Check server debug at http://localhost:8080/who
