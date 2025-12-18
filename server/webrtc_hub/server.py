@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Set, Optional, Any
 
 from aiohttp import web
+import aiohttp_cors
 from aiortc import (
     RTCPeerConnection,
     RTCSessionDescription,
@@ -242,6 +243,20 @@ def create_app() -> web.Application:
     app.router.add_get("/who", who)
     app.router.add_post("/offer", offer)
     app.on_shutdown.append(on_shutdown)
+
+    # Allow browser-based clients to hit the signaling endpoints during dev/testing.
+    cors = aiohttp_cors.setup(
+        app,
+        defaults={
+            "*": aiohttp_cors.ResourceOptions(
+                allow_credentials=True,
+                expose_headers="*",
+                allow_headers="*",
+            )
+        },
+    )
+    for route in list(app.router.routes()):
+        cors.add(route)
     return app
 
 
