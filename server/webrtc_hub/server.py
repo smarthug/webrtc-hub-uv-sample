@@ -191,6 +191,12 @@ async def offer(request: web.Request) -> web.Response:
                 channel.send(json.dumps({"type": "pong", "ts": data.get("ts")}, ensure_ascii=False))
                 return
 
+            if t == "data":
+                # Log client payloads sent to the hub.
+                log.info("recv data client_id=%s payload=%s", client_id, data.get("payload"))
+                channel.send(json.dumps({"type": "data_ack", "ts": data.get("ts")}, ensure_ascii=False))
+                return
+
             # default: echo for debugging
             channel.send(json.dumps({"type": "echo", "payload": data}, ensure_ascii=False))
 
