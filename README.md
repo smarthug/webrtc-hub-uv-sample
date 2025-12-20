@@ -24,7 +24,7 @@ npm install
 npm run dev
 ```
 
-### 3) C# client (optional)
+### 3) C# client
 ```bash
 cd webrtc_csharp_client
 dotnet restore
