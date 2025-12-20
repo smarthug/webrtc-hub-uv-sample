@@ -1,5 +1,8 @@
 # WebRTC Hub Sample (React + Python/uv)
 
+<img width="1536" height="1024" alt="ChatGPT Image 2025년 12월 20일 오전 11_05_13" src="https://github.com/user-attachments/assets/3c0b8891-35f9-4b33-9359-4445576f56dd" />
+
+
 Python is the central hub:
 - React ↔ Python (DataChannel)
 - .NET ↔ Python (DataChannel)
