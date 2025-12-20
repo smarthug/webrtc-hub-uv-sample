@@ -21,9 +21,21 @@ npm install
 npm run dev
 ```
 
+### 3) C# client (optional)
+```bash
+cd webrtc_csharp_client
+dotnet restore
+dotnet run -- http://127.0.0.1:8080 client1 csharp
+```
+
 ## Test quickly
 - Open two tabs at http://localhost:5173
 - Use different `client_id` values
 - Connect both
 - Use **Send to** or **Broadcast room**
 - Check server debug at http://localhost:8080/who
+
+## Hub endpoints
+- `POST /offer?client_id=...&role=...`
+- `GET /who`
+- `GET /health`
