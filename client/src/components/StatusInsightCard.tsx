@@ -22,13 +22,21 @@ interface Props {
 }
 
 export function StatusInsightCard({ detections, healthScore }: Props) {
-  // ECOD 분석 결과 해설
+  // ECOD 분석 결과 해설 (항상 표시)
   const ecodInsights = useMemo(() => {
     const ecodResults = detections.filter(d => d.engine === 'ecod');
     const multivariate = ecodResults.find(d => d.metric === 'Multivariate');
     const metrics = ecodResults.filter(d => d.metric !== 'Multivariate');
     
-    if (!multivariate) return null;
+    // 데이터 없을 때 기본값
+    if (!multivariate) {
+      return {
+        status: 'normal' as const,
+        message: '데이터 수집 중...',
+        score: 0,
+        details: [],
+      };
+    }
     
     const warnings = metrics.filter(d => d.severity === 'warning' || d.severity === 'critical');
     
