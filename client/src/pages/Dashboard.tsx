@@ -11,6 +11,9 @@ function generateClientId(): string {
 
 export function Dashboard() {
   const [clientId] = useState(generateClientId);
+  // Use same host as frontend, different port
+  const serverUrl = `${window.location.protocol}//${window.location.hostname}:8080`;
+  
   const {
     connected,
     mode,
@@ -20,7 +23,7 @@ export function Dashboard() {
     connect,
     disconnect,
   } = useWebRTC({
-    serverUrl: 'http://localhost:8080',
+    serverUrl,
     clientId,
     role: 'viewer',
   });
