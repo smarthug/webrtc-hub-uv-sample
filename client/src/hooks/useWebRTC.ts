@@ -29,8 +29,11 @@ interface AnomalyData {
     forecast?: number;
     residual?: number;
     severity: string;
+    confidence?: number;
+    details?: string;
   }>;
   health_score: number;
+  ensemble_score?: number;
   raw_metrics: Record<string, number>;
 }
 

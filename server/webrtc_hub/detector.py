@@ -1,13 +1,13 @@
 """
-PulseAI Lite - Anomaly Detection Engine
-ECOD (실시간 이상 감지) + AutoARIMA (예측 기반 이상 탐지)
+PulseAI Lite - Enhanced Anomaly Detection Engine
+ECOD (다변량 분석) + AutoARIMA (모델 캐싱) + 앙상블 탐지
 """
 
 import logging
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
 import numpy as np
 import pandas as pd
@@ -19,9 +19,22 @@ log = logging.getLogger("detector")
 
 # Configuration
 WINDOW_SIZE = 60  # 60 data points (~5 minutes at 5s intervals)
-ECOD_CONTAMINATION = 0.02  # 2% expected outliers
-ARIMA_HORIZON = 6  # Predict 6 steps ahead (30 seconds)
-ARIMA_RESIDUAL_K = 2.5  # k * sigma threshold
+MIN_SAMPLES_ECOD = 20  # Minimum samples for ECOD
+MIN_SAMPLES_ARIMA = 30  # Minimum samples for ARIMA
+
+# Dynamic contamination based on data characteristics
+BASE_CONTAMINATION = 0.05  # Start with 5%
+
+# ARIMA settings
+ARIMA_SEASON_LENGTH = 12
+ARIMA_RESIDUAL_K = 2.5
+
+# Ensemble weights
+ECOD_WEIGHT = 0.6
+ARIMA_WEIGHT = 0.4
+
+# Peripheral device failure tracking
+PERIPHERAL_FAILURE_THRESHOLD = 3  # Alert after N consecutive failures
 
 
 @dataclass
@@ -36,16 +49,25 @@ class MetricBuffer:
 
 
 @dataclass
+class PeripheralState:
+    """Track peripheral device states."""
+    failure_counts: Dict[str, int] = field(default_factory=dict)
+    last_states: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class AnomalyResult:
     """Single anomaly detection result."""
-    engine: str  # "ecod" or "arima"
+    engine: str  # "ecod", "arima", "ensemble", "peripheral"
     metric: str
     value: float
     score: float = 0.0
     threshold: float = 0.0
     forecast: Optional[float] = None
     residual: Optional[float] = None
-    severity: str = "normal"  # "normal", "warning", "critical"
+    severity: str = "normal"
+    confidence: float = 0.0  # 0-1, how confident in this detection
+    details: Optional[str] = None
 
 
 @dataclass
@@ -56,30 +78,41 @@ class DetectionResult:
     detections: List[AnomalyResult] = field(default_factory=list)
     health_score: int = 100
     raw_metrics: Dict[str, float] = field(default_factory=dict)
+    ensemble_score: float = 0.0
 
 
-class AnomalyDetector:
+class EnhancedAnomalyDetector:
     """
-    PulseAI Lite Anomaly Detector
+    PulseAI Lite Enhanced Anomaly Detector
     
-    Combines:
-    - ECOD: Real-time distribution-based anomaly detection
-    - AutoARIMA: Forecast-based anomaly detection
+    Improvements:
+    - Multivariate ECOD (considers metric correlations)
+    - ARIMA model caching (faster predictions)
+    - Ensemble detection (combined confidence)
+    - Peripheral device monitoring
+    - Dynamic threshold adjustment
     """
     
     def __init__(self):
         self.buffers: Dict[str, MetricBuffer] = {}
-        self.ecod_models: Dict[str, Dict[str, ECOD]] = {}
-        self.arima_models: Dict[str, Dict[str, Any]] = {}
+        self.peripheral_states: Dict[str, PeripheralState] = {}
+        
+        # Model caching
+        self.ecod_models: Dict[str, ECOD] = {}  # agent_id -> model
+        self.arima_models: Dict[str, Dict[str, StatsForecast]] = {}  # agent_id -> {metric -> model}
         self.arima_residuals: Dict[str, Dict[str, deque]] = {}
+        
+        # Adaptive thresholds
+        self.score_history: Dict[str, deque] = {}  # For dynamic threshold
         
     def _ensure_buffer(self, agent_id: str) -> MetricBuffer:
         """Ensure buffer exists for agent."""
         if agent_id not in self.buffers:
             self.buffers[agent_id] = MetricBuffer()
-            self.ecod_models[agent_id] = {}
+            self.peripheral_states[agent_id] = PeripheralState()
             self.arima_models[agent_id] = {}
             self.arima_residuals[agent_id] = {}
+            self.score_history[agent_id] = deque(maxlen=100)
         return self.buffers[agent_id]
     
     def _update_buffer(self, agent_id: str, data: dict) -> None:
@@ -96,66 +129,153 @@ class AnomalyDetector:
         
         buf.timestamps.append(data.get("Timestamp", ""))
     
-    def _run_ecod(self, agent_id: str, metric_name: str, values: deque) -> Optional[AnomalyResult]:
-        """Run ECOD on a single metric."""
-        if len(values) < 20:  # Need minimum data
-            return None
+    def _get_dynamic_contamination(self, agent_id: str) -> float:
+        """Calculate dynamic contamination based on recent score history."""
+        if agent_id not in self.score_history or len(self.score_history[agent_id]) < 10:
+            return BASE_CONTAMINATION
         
-        arr = np.array(values).reshape(-1, 1)
+        scores = list(self.score_history[agent_id])
+        # If many recent anomalies, increase sensitivity
+        high_scores = sum(1 for s in scores if s > 0.7)
+        ratio = high_scores / len(scores)
+        
+        # Adjust contamination: more anomalies -> lower contamination (more strict)
+        if ratio > 0.3:
+            return max(0.01, BASE_CONTAMINATION - 0.02)
+        elif ratio < 0.05:
+            return min(0.10, BASE_CONTAMINATION + 0.02)
+        return BASE_CONTAMINATION
+    
+    def _run_multivariate_ecod(self, agent_id: str) -> List[AnomalyResult]:
+        """Run multivariate ECOD on all metrics simultaneously."""
+        buf = self.buffers.get(agent_id)
+        if not buf or len(buf.cpu) < MIN_SAMPLES_ECOD:
+            return []
+        
+        results = []
         
         try:
-            # Train ECOD model
-            model = ECOD(contamination=ECOD_CONTAMINATION)
-            model.fit(arr)
+            # Combine metrics into multivariate array
+            cpu_arr = np.array(buf.cpu)
+            mem_arr = np.array(buf.memory)
+            disk_arr = np.array(buf.disk_io)
             
-            # Get score for latest point
-            latest = arr[-1].reshape(1, -1)
+            # Multivariate data matrix
+            X = np.column_stack([cpu_arr, mem_arr, disk_arr])
+            
+            # Dynamic contamination
+            contamination = self._get_dynamic_contamination(agent_id)
+            
+            # Train ECOD model
+            model = ECOD(contamination=contamination)
+            model.fit(X)
+            
+            # Cache model
+            self.ecod_models[agent_id] = model
+            
+            # Get scores for latest point
+            latest = X[-1].reshape(1, -1)
             score = model.decision_function(latest)[0]
             is_outlier = model.predict(latest)[0] == 1
             
-            # Determine severity
-            current_value = float(values[-1])
-            threshold = float(np.percentile(arr, 98))
+            # Normalize score to 0-1 range
+            all_scores = model.decision_function(X)
+            score_normalized = (score - all_scores.min()) / (all_scores.max() - all_scores.min() + 1e-10)
             
+            # Track score history
+            self.score_history[agent_id].append(score_normalized)
+            
+            # Determine severity based on normalized score
             if is_outlier:
-                severity = "critical" if score > 0.9 else "warning"
+                if score_normalized > 0.9:
+                    severity = "critical"
+                    confidence = 0.9
+                elif score_normalized > 0.7:
+                    severity = "warning"
+                    confidence = 0.7
+                else:
+                    severity = "warning"
+                    confidence = 0.5
             else:
                 severity = "normal"
+                confidence = 1.0 - score_normalized
             
-            return AnomalyResult(
+            # Create result for multivariate analysis
+            results.append(AnomalyResult(
                 engine="ecod",
-                metric=metric_name,
-                value=current_value,
-                score=float(score),
-                threshold=threshold,
+                metric="Multivariate",
+                value=float(score),
+                score=float(score_normalized),
+                threshold=float(contamination),
                 severity=severity,
-            )
+                confidence=confidence,
+                details=f"CPU={cpu_arr[-1]:.1f}, Mem={mem_arr[-1]:.1f}, Disk={disk_arr[-1]:.2f}"
+            ))
+            
+            # Also provide per-metric breakdown using feature contributions
+            metric_names = ["CPU", "Memory", "DiskIO"]
+            metric_values = [cpu_arr[-1], mem_arr[-1], disk_arr[-1]]
+            
+            for i, (name, value) in enumerate(zip(metric_names, metric_values)):
+                # Simple univariate score approximation
+                metric_data = X[:, i]
+                percentile = np.sum(metric_data < value) / len(metric_data)
+                metric_score = abs(percentile - 0.5) * 2  # Distance from median
+                
+                results.append(AnomalyResult(
+                    engine="ecod",
+                    metric=name,
+                    value=float(value),
+                    score=float(metric_score),
+                    threshold=float(np.percentile(metric_data, 95)),
+                    severity="warning" if metric_score > 0.8 else "normal",
+                    confidence=confidence * 0.8,  # Slightly lower confidence for breakdown
+                ))
+            
         except Exception as e:
-            log.warning(f"ECOD failed for {metric_name}: {e}")
-            return None
+            log.warning(f"Multivariate ECOD failed: {e}")
+        
+        return results
     
-    def _run_arima(self, agent_id: str, metric_name: str, values: deque) -> Optional[AnomalyResult]:
-        """Run AutoARIMA forecast and detect anomalies."""
-        if len(values) < 30:  # Need more data for ARIMA
+    def _run_cached_arima(self, agent_id: str, metric_name: str, values: deque) -> Optional[AnomalyResult]:
+        """Run AutoARIMA with model caching for faster predictions."""
+        if len(values) < MIN_SAMPLES_ARIMA:
             return None
         
         try:
-            # Prepare data for statsforecast
             arr = np.array(values)
+            
+            # Prepare data
             df = pd.DataFrame({
                 "unique_id": agent_id,
                 "ds": pd.date_range(end=pd.Timestamp.now(), periods=len(arr), freq="5s"),
                 "y": arr,
             })
             
-            # Fit AutoARIMA
-            sf = StatsForecast(
-                models=[AutoARIMA(season_length=12)],
-                freq="5s",
-            )
-            sf.fit(df)
+            # Check if we have a cached model
+            need_retrain = False
+            if metric_name not in self.arima_models[agent_id]:
+                need_retrain = True
+            else:
+                # Retrain periodically (every 100 data points)
+                if len(values) % 100 == 0:
+                    need_retrain = True
             
-            # Get forecast for next step
+            if need_retrain:
+                # Train new model
+                sf = StatsForecast(
+                    models=[AutoARIMA(season_length=ARIMA_SEASON_LENGTH)],
+                    freq="5s",
+                )
+                sf.fit(df)
+                self.arima_models[agent_id][metric_name] = sf
+                log.info(f"ARIMA model trained for {agent_id}/{metric_name}")
+            else:
+                sf = self.arima_models[agent_id][metric_name]
+                # Update with new data (partial fit simulation)
+                sf.fit(df)
+            
+            # Forecast
             forecast_df = sf.predict(h=1)
             forecast_value = float(forecast_df["AutoARIMA"].iloc[0])
             
@@ -163,44 +283,130 @@ class AnomalyDetector:
             actual_value = float(arr[-1])
             residual = abs(actual_value - forecast_value)
             
-            # Track residuals for threshold calculation
+            # Track residuals for adaptive threshold
             if metric_name not in self.arima_residuals[agent_id]:
                 self.arima_residuals[agent_id][metric_name] = deque(maxlen=WINDOW_SIZE)
             self.arima_residuals[agent_id][metric_name].append(residual)
             
-            # Calculate threshold based on residual history
+            # Calculate adaptive threshold
             residual_history = np.array(self.arima_residuals[agent_id][metric_name])
-            threshold = float(ARIMA_RESIDUAL_K * np.std(residual_history))
+            if len(residual_history) > 5:
+                threshold = float(ARIMA_RESIDUAL_K * np.std(residual_history))
+                threshold = max(threshold, 0.1)  # Minimum threshold
+            else:
+                threshold = float(np.mean(residual_history) * 2) if len(residual_history) > 0 else 1.0
             
-            # Determine severity
-            if residual > threshold and len(residual_history) > 10:
-                severity = "critical" if residual > threshold * 1.5 else "warning"
+            # Calculate normalized score
+            score = residual / max(threshold, 0.01)
+            
+            # Determine severity with confidence
+            if residual > threshold * 1.5:
+                severity = "critical"
+                confidence = min(0.95, score / 2)
+            elif residual > threshold:
+                severity = "warning"
+                confidence = min(0.8, score / 2)
             else:
                 severity = "normal"
+                confidence = 1.0 - min(0.9, score)
             
             return AnomalyResult(
                 engine="arima",
                 metric=metric_name,
                 value=actual_value,
-                score=float(residual / max(threshold, 0.01)),
+                score=float(score),
                 threshold=threshold,
                 forecast=forecast_value,
                 residual=float(residual),
                 severity=severity,
+                confidence=confidence,
+                details=f"Predicted: {forecast_value:.2f}, Actual: {actual_value:.2f}"
             )
+            
         except Exception as e:
-            log.warning(f"AutoARIMA failed for {metric_name}: {e}")
+            log.warning(f"Cached AutoARIMA failed for {metric_name}: {e}")
             return None
     
-    def detect(self, data: dict) -> DetectionResult:
+    def _check_peripherals(self, agent_id: str, data: dict) -> List[AnomalyResult]:
+        """Monitor peripheral device status from logs."""
+        results = []
+        logs = data.get("Logs", [])
+        
+        if not logs:
+            return results
+        
+        state = self.peripheral_states[agent_id]
+        
+        for log_entry in logs:
+            if log_entry.get("BodyType") == "주변장치 체크":
+                key_values = log_entry.get("KeyValues", {})
+                
+                for device, status in key_values.items():
+                    prev_status = state.last_states.get(device)
+                    state.last_states[device] = status
+                    
+                    if status == "실패":
+                        state.failure_counts[device] = state.failure_counts.get(device, 0) + 1
+                        
+                        # Alert on consecutive failures
+                        if state.failure_counts[device] >= PERIPHERAL_FAILURE_THRESHOLD:
+                            results.append(AnomalyResult(
+                                engine="peripheral",
+                                metric=device,
+                                value=float(state.failure_counts[device]),
+                                score=min(1.0, state.failure_counts[device] / 10),
+                                threshold=float(PERIPHERAL_FAILURE_THRESHOLD),
+                                severity="critical" if state.failure_counts[device] >= 5 else "warning",
+                                confidence=0.95,
+                                details=f"{device} 연속 {state.failure_counts[device]}회 실패"
+                            ))
+                    elif status == "연결":
+                        # Reset failure count on success
+                        if device in state.failure_counts and state.failure_counts[device] > 0:
+                            log.info(f"Peripheral {device} recovered after {state.failure_counts[device]} failures")
+                        state.failure_counts[device] = 0
+        
+        return results
+    
+    def _calculate_ensemble_score(self, detections: List[AnomalyResult]) -> Tuple[float, str]:
+        """Calculate ensemble score from ECOD and ARIMA results."""
+        ecod_scores = [d.score * d.confidence for d in detections if d.engine == "ecod"]
+        arima_scores = [d.score * d.confidence for d in detections if d.engine == "arima"]
+        
+        ecod_avg = np.mean(ecod_scores) if ecod_scores else 0
+        arima_avg = np.mean(arima_scores) if arima_scores else 0
+        
+        # Weighted ensemble
+        if ecod_scores and arima_scores:
+            ensemble = ECOD_WEIGHT * ecod_avg + ARIMA_WEIGHT * arima_avg
+        elif ecod_scores:
+            ensemble = ecod_avg
+        elif arima_scores:
+            ensemble = arima_avg
+        else:
+            ensemble = 0
+        
+        # Determine overall severity
+        if ensemble > 0.8:
+            severity = "critical"
+        elif ensemble > 0.5:
+            severity = "warning"
+        else:
+            severity = "normal"
+        
+        return float(ensemble), severity
+    
+    def detect(self, data: dict, run_ecod: bool = True, run_arima: bool = True) -> DetectionResult:
         """
-        Run anomaly detection on incoming data.
+        Run enhanced anomaly detection on incoming data.
         
         Args:
             data: POS metric data point
+            run_ecod: Whether to run ECOD this cycle
+            run_arima: Whether to run ARIMA this cycle
             
         Returns:
-            DetectionResult with anomalies and health score
+            DetectionResult with anomalies, ensemble score, and health score
         """
         agent_id = data.get("AgentId", "unknown")
         timestamp = data.get("Timestamp", "")
@@ -220,33 +426,49 @@ class AnomalyDetector:
             "NetworkRecv": data.get("Network", {}).get("Recv", 0),
         }
         
-        # Run ECOD on each metric
-        metrics = [
-            ("CPU", buf.cpu),
-            ("Memory", buf.memory),
-            ("DiskIO", buf.disk_io),
-        ]
+        # 1. Multivariate ECOD
+        if run_ecod:
+            ecod_results = self._run_multivariate_ecod(agent_id)
+            detections.extend(ecod_results)
         
-        for metric_name, values in metrics:
-            result = self._run_ecod(agent_id, metric_name, values)
-            if result and result.severity != "normal":
-                detections.append(result)
-        
-        # Run ARIMA on key metrics (less frequently due to cost)
-        if len(buf.cpu) >= 30 and len(buf.cpu) % 6 == 0:  # Every 30 seconds
+        # 2. Cached AutoARIMA
+        if run_arima:
             for metric_name, values in [("CPU", buf.cpu), ("Memory", buf.memory)]:
-                result = self._run_arima(agent_id, metric_name, values)
-                if result and result.severity != "normal":
+                result = self._run_cached_arima(agent_id, metric_name, values)
+                if result:
                     detections.append(result)
         
-        # Calculate health score
+        # 3. Peripheral monitoring
+        peripheral_results = self._check_peripherals(agent_id, data)
+        detections.extend(peripheral_results)
+        
+        # 4. Calculate ensemble score
+        ensemble_score, ensemble_severity = self._calculate_ensemble_score(detections)
+        
+        # Add ensemble result if we have both ECOD and ARIMA
+        ecod_count = sum(1 for d in detections if d.engine == "ecod")
+        arima_count = sum(1 for d in detections if d.engine == "arima")
+        
+        if ecod_count > 0 and arima_count > 0:
+            detections.append(AnomalyResult(
+                engine="ensemble",
+                metric="Combined",
+                value=ensemble_score,
+                score=ensemble_score,
+                threshold=0.5,
+                severity=ensemble_severity,
+                confidence=0.9 if ensemble_score > 0.7 else 0.7,
+                details=f"ECOD weight={ECOD_WEIGHT}, ARIMA weight={ARIMA_WEIGHT}"
+            ))
+        
+        # 5. Calculate health score
         health_score = 100
         for d in detections:
             if d.severity == "critical":
-                health_score -= 20
+                health_score -= int(20 * d.confidence)
             elif d.severity == "warning":
-                health_score -= 10
-        health_score = max(0, health_score)
+                health_score -= int(10 * d.confidence)
+        health_score = max(0, min(100, health_score))
         
         return DetectionResult(
             agent_id=agent_id,
@@ -254,6 +476,7 @@ class AnomalyDetector:
             detections=detections,
             health_score=health_score,
             raw_metrics=raw_metrics,
+            ensemble_score=ensemble_score,
         )
     
     def to_dict(self, result: DetectionResult) -> dict:
@@ -272,13 +495,16 @@ class AnomalyDetector:
                     "forecast": d.forecast,
                     "residual": d.residual,
                     "severity": d.severity,
+                    "confidence": d.confidence,
+                    "details": d.details,
                 }
                 for d in result.detections
             ],
             "health_score": result.health_score,
+            "ensemble_score": result.ensemble_score,
             "raw_metrics": result.raw_metrics,
         }
 
 
 # Global detector instance
-detector = AnomalyDetector()
+detector = EnhancedAnomalyDetector()

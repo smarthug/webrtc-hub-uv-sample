@@ -20,7 +20,7 @@ from aiortc import (
     RTCIceServer,
 )
 
-from .detector import detector, AnomalyDetector
+from .detector import detector, EnhancedAnomalyDetector
 from .sample_loader import sample_data_generator
 
 logging.basicConfig(level=logging.INFO)
@@ -125,72 +125,39 @@ ARIMA_INTERVAL = 60.0   # AutoARIMA every 60 seconds
 
 
 def process_data(data: dict) -> dict:
-    """Process incoming data through anomaly detector and return result."""
+    """Process incoming data through enhanced anomaly detector."""
     agent_id = data.get("AgentId", "unknown")
     now = time.time()
     
-    # Always update buffer
-    detector._ensure_buffer(agent_id)
-    detector._update_buffer(agent_id, data)
+    # Determine what to run this cycle
+    run_ecod = False
+    run_arima = False
     
-    detections = []
-    buf = detector.buffers.get(agent_id)
-    
-    # ECOD: every 10 seconds
     last_ecod = _last_ecod_time.get(agent_id, 0)
-    if now - last_ecod >= ECOD_INTERVAL and buf and len(buf.cpu) >= 20:
+    if now - last_ecod >= ECOD_INTERVAL:
         _last_ecod_time[agent_id] = now
-        for metric_name, values in [("CPU", buf.cpu), ("Memory", buf.memory), ("DiskIO", buf.disk_io)]:
-            result = detector._run_ecod(agent_id, metric_name, values)
-            if result:
-                detections.append(result)  # Include ALL results, not just anomalies
-                log.info(f"ECOD {metric_name}: score={result.score:.3f}, severity={result.severity}")
+        run_ecod = True
     
-    # AutoARIMA: every 60 seconds
     last_arima = _last_arima_time.get(agent_id, 0)
-    if now - last_arima >= ARIMA_INTERVAL and buf and len(buf.cpu) >= 30:
+    if now - last_arima >= ARIMA_INTERVAL:
         _last_arima_time[agent_id] = now
-        for metric_name, values in [("CPU", buf.cpu), ("Memory", buf.memory)]:
-            result = detector._run_arima(agent_id, metric_name, values)
-            if result:
-                detections.append(result)  # Include ALL results
-                log.info(f"ARIMA {metric_name}: value={result.value:.2f}, forecast={result.forecast:.2f}, residual={result.residual:.2f}")
+        run_arima = True
     
-    # Calculate health score
-    health_score = 100
-    for d in detections:
-        if d.severity == "critical":
-            health_score -= 20
-        elif d.severity == "warning":
-            health_score -= 10
-    health_score = max(0, health_score)
+    # Run enhanced detection
+    result = detector.detect(data, run_ecod=run_ecod, run_arima=run_arima)
     
-    return {
-        "type": "anomaly" if detections else "metrics",
-        "agent_id": agent_id,
-        "timestamp": data.get("Timestamp", ""),
-        "detections": [
-            {
-                "engine": d.engine,
-                "metric": d.metric,
-                "value": d.value,
-                "score": d.score,
-                "threshold": d.threshold,
-                "forecast": d.forecast,
-                "residual": d.residual,
-                "severity": d.severity,
-            }
-            for d in detections
-        ],
-        "health_score": health_score,
-        "raw_metrics": {
-            "CPU": data.get("CPU", 0),
-            "Memory": data.get("Memory", 0),
-            "DiskIO": data.get("DiskIO", 0),
-            "NetworkSent": data.get("Network", {}).get("Sent", 0),
-            "NetworkRecv": data.get("Network", {}).get("Recv", 0),
-        },
-    }
+    # Log detections
+    for d in result.detections:
+        if d.engine == "ecod":
+            log.info(f"ECOD {d.metric}: score={d.score:.3f}, severity={d.severity}, confidence={d.confidence:.2f}")
+        elif d.engine == "arima":
+            log.info(f"ARIMA {d.metric}: value={d.value:.2f}, forecast={d.forecast:.2f}, residual={d.residual:.2f}")
+        elif d.engine == "ensemble":
+            log.info(f"ENSEMBLE: score={d.score:.3f}, severity={d.severity}")
+        elif d.engine == "peripheral":
+            log.info(f"PERIPHERAL {d.metric}: {d.details}")
+    
+    return detector.to_dict(result)
 
 
 async def run_sample_mode(file_path: Path) -> None:
