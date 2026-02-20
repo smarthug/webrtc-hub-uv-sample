@@ -79,16 +79,29 @@ export function useWebRTC(config: WebRTCConfig) {
         
         if (data.type === 'welcome') {
           setMode(data.mode || 'unknown');
-        } else if (data.type === 'metrics') {
-          const metricsData = data as MetricsData;
+        } else if (data.type === 'metrics' || data.type === 'anomaly') {
+          // Extract metrics from raw_metrics if present
+          const rawMetrics = data.raw_metrics || {};
+          const metricsData: MetricsData = {
+            type: 'metrics',
+            agent_id: data.agent_id || 'unknown',
+            timestamp: data.timestamp || '',
+            cpu: rawMetrics.CPU ?? data.cpu ?? 0,
+            memory: rawMetrics.Memory ?? data.memory ?? 0,
+            disk_io: rawMetrics.DiskIO ?? data.disk_io ?? 0,
+            network: rawMetrics.Network ?? data.network ?? { Sent: 0, Recv: 0 },
+          };
           metricsBufferRef.current = [...metricsBufferRef.current.slice(-99), metricsData];
           setMetrics([...metricsBufferRef.current]);
-        } else if (data.type === 'anomaly') {
-          const anomalyData = data as AnomalyData;
-          setHealthScore(anomalyData.health_score);
-          if (anomalyData.detections.length > 0) {
+          
+          // Handle anomaly detections
+          if (data.detections?.length > 0) {
+            const anomalyData = data as AnomalyData;
+            setHealthScore(anomalyData.health_score ?? 100);
             anomaliesBufferRef.current = [...anomaliesBufferRef.current.slice(-49), anomalyData];
             setAnomalies([...anomaliesBufferRef.current]);
+          } else if (data.health_score !== undefined) {
+            setHealthScore(data.health_score);
           }
         }
       } catch (e) {

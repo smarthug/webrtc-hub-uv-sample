@@ -1,21 +1,18 @@
 """
 Sample data loader for PulseAI Lite.
-Reads data_pos.txt and replays at real-time speed.
+Reads data_pos.txt and replays at configurable speed.
 """
 
 import asyncio
 import json
 import logging
-from datetime import datetime
 from pathlib import Path
-from typing import AsyncIterator, Callable, Optional
+from typing import AsyncIterator, Callable
 
 log = logging.getLogger("sample-loader")
 
-
-def parse_timestamp(ts_str: str) -> datetime:
-    """Parse timestamp string to datetime."""
-    return datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+# Configurable delay between records (seconds)
+SAMPLE_DELAY = 0.5  # 0.5s = 2 records per second
 
 
 async def load_sample_file(
@@ -24,7 +21,7 @@ async def load_sample_file(
     loop: bool = False,
 ) -> None:
     """
-    Load sample file and replay at real-time speed.
+    Load sample file and replay at fixed speed.
     
     Args:
         file_path: Path to data_pos.txt
@@ -38,7 +35,6 @@ async def load_sample_file(
     log.info(f"Loading sample file: {file_path}")
     
     while True:
-        prev_ts: Optional[datetime] = None
         line_count = 0
         
         with open(file_path, "r", encoding="utf-8") as f:
@@ -53,25 +49,8 @@ async def load_sample_file(
                     log.warning(f"Invalid JSON at line {line_count}: {e}")
                     continue
                 
-                # Get timestamp for delay calculation
-                ts_str = data.get("Timestamp")
-                if ts_str:
-                    try:
-                        current_ts = parse_timestamp(ts_str)
-                        
-                        # Calculate delay based on timestamp difference
-                        if prev_ts is not None:
-                            delay = abs(current_ts - prev_ts).total_seconds()
-                            # Use absolute value and ensure minimum delay
-                            delay = max(0.1, min(delay, 5.0))  # 0.1s ~ 5s
-                            await asyncio.sleep(delay)
-                        else:
-                            # First record - small delay
-                            await asyncio.sleep(0.1)
-                        
-                        prev_ts = current_ts
-                    except ValueError:
-                        pass
+                # Fixed delay for consistent playback
+                await asyncio.sleep(SAMPLE_DELAY)
                 
                 # Call the data handler
                 on_data(data)
@@ -94,7 +73,7 @@ async def sample_data_generator(
     loop: bool = False,
 ) -> AsyncIterator[dict]:
     """
-    Async generator that yields data points at real-time speed.
+    Async generator that yields data points at fixed speed.
     
     Args:
         file_path: Path to data_pos.txt
@@ -110,7 +89,6 @@ async def sample_data_generator(
     log.info(f"Loading sample file: {file_path}")
     
     while True:
-        prev_ts: Optional[datetime] = None
         line_count = 0
         
         with open(file_path, "r", encoding="utf-8") as f:
@@ -124,25 +102,8 @@ async def sample_data_generator(
                 except json.JSONDecodeError:
                     continue
                 
-                # Get timestamp for delay calculation
-                ts_str = data.get("Timestamp")
-                if ts_str:
-                    try:
-                        current_ts = parse_timestamp(ts_str)
-                        
-                        # Calculate delay based on timestamp difference
-                        if prev_ts is not None:
-                            delay = abs(current_ts - prev_ts).total_seconds()
-                            # Use absolute value and ensure minimum delay
-                            delay = max(0.1, min(delay, 5.0))  # 0.1s ~ 5s
-                            await asyncio.sleep(delay)
-                        else:
-                            # First record - small delay
-                            await asyncio.sleep(0.1)
-                        
-                        prev_ts = current_ts
-                    except ValueError:
-                        pass
+                # Fixed delay for consistent playback
+                await asyncio.sleep(SAMPLE_DELAY)
                 
                 yield data
                 line_count += 1
