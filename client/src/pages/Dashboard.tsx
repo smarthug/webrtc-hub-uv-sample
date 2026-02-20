@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useWebRTC } from '../hooks/useWebRTC';
 import ReactECharts from 'echarts-for-react';
+import { PeripheralCards } from '../components/PeripheralCards';
 
 function generateClientId(): string {
   return `viewer-${Math.random().toString(36).substring(2, 8)}`;
@@ -264,30 +265,8 @@ export function Dashboard() {
         <ReactECharts option={arimaChartOption} style={{ height: '280px' }} />
       </div>
 
-      {/* Peripheral Alerts */}
-      {peripheralAlerts.length > 0 && (
-        <div style={{ 
-          backgroundColor: '#7f1d1d', 
-          borderRadius: '12px', 
-          padding: '16px', 
-          marginBottom: '20px',
-          border: '1px solid #ef4444'
-        }}>
-          <h3 style={{ margin: '0 0 12px', fontSize: '16px' }}>🔌 주변장치 경고</h3>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-            {peripheralAlerts.map((alert, i) => (
-              <span key={i} style={{
-                padding: '6px 12px',
-                borderRadius: '6px',
-                backgroundColor: '#991b1b',
-                fontSize: '13px',
-              }}>
-                {alert.metric}: {alert.details}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Peripheral Status Cards */}
+      <PeripheralCards alerts={peripheralAlerts} />
 
       {/* Detection Table */}
       <div style={{ backgroundColor: '#1e293b', borderRadius: '12px', padding: '16px' }}>
