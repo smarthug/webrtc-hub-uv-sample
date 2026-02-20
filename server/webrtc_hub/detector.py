@@ -68,6 +68,8 @@ class AnomalyResult:
     severity: str = "normal"
     confidence: float = 0.0  # 0-1, how confident in this detection
     details: Optional[str] = None
+    # Multi-step forecast for ARIMA
+    forecast_horizon: Optional[List[Dict[str, Any]]] = None  # [{minutes, value, severity}]
 
 
 @dataclass
@@ -275,9 +277,17 @@ class EnhancedAnomalyDetector:
                 # Update with new data (partial fit simulation)
                 sf.fit(df)
             
-            # Forecast
-            forecast_df = sf.predict(h=1)
-            forecast_value = float(forecast_df["AutoARIMA"].iloc[0])
+            # Multi-step forecast (30분, 1시간, 2시간)
+            # 5s interval: 30min=360, 1hr=720, 2hr=1440
+            horizon_steps = [360, 720, 1440]  # 30min, 1hr, 2hr
+            horizon_minutes = [30, 60, 120]
+            max_h = max(horizon_steps)
+            
+            forecast_df = sf.predict(h=max_h)
+            all_forecasts = forecast_df["AutoARIMA"].values
+            
+            # Current (1-step) forecast for comparison
+            forecast_value = float(all_forecasts[0])
             
             # Calculate residual
             actual_value = float(arr[-1])
@@ -310,6 +320,28 @@ class EnhancedAnomalyDetector:
                 severity = "normal"
                 confidence = 1.0 - min(0.9, score)
             
+            # Build multi-step forecast horizon
+            forecast_horizon = []
+            warning_threshold = 80.0 if metric_name == "CPU" else 85.0  # CPU 80%, Memory 85%
+            critical_threshold = 90.0 if metric_name == "CPU" else 95.0
+            
+            for steps, minutes in zip(horizon_steps, horizon_minutes):
+                pred_value = float(all_forecasts[steps - 1])
+                
+                # Determine future severity
+                if pred_value >= critical_threshold:
+                    future_severity = "critical"
+                elif pred_value >= warning_threshold:
+                    future_severity = "warning"
+                else:
+                    future_severity = "normal"
+                
+                forecast_horizon.append({
+                    "minutes": minutes,
+                    "value": pred_value,
+                    "severity": future_severity,
+                })
+            
             return AnomalyResult(
                 engine="arima",
                 metric=metric_name,
@@ -320,7 +352,8 @@ class EnhancedAnomalyDetector:
                 residual=float(residual),
                 severity=severity,
                 confidence=confidence,
-                details=f"Predicted: {forecast_value:.2f}, Actual: {actual_value:.2f}"
+                details=f"Predicted: {forecast_value:.2f}, Actual: {actual_value:.2f}",
+                forecast_horizon=forecast_horizon,
             )
             
         except Exception as e:
@@ -497,6 +530,7 @@ class EnhancedAnomalyDetector:
                     "severity": d.severity,
                     "confidence": d.confidence,
                     "details": d.details,
+                    "forecast_horizon": d.forecast_horizon,  # Multi-step predictions
                 }
                 for d in result.detections
             ],
