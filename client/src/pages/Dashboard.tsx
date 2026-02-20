@@ -98,112 +98,46 @@ export function Dashboard() {
     ],
   };
 
-  // Get latest ARIMA forecast horizon for future predictions (use CPU data)
-  const forecastHorizon = latestCpuArima?.forecast_horizon || [];
-  
-  // Build X-axis labels: past data + future predictions
-  const pastLabels = cpuArimaData.map((_, i) => `${i + 1}`);
-  const futureLabels = forecastHorizon.map(f => `+${f.minutes}분`);
-  const allLabels = [...pastLabels, ...futureLabels];
-  
-  // Build series data with future predictions
-  // 실제값: 과거 데이터만
-  const actualValues = [...cpuArimaData.map(d => d.value), ...forecastHorizon.map(() => null)];
-  
-  // 예측값: 마지막 실제값부터 시작해서 미래까지 연결
-  const lastActualValue = cpuArimaData.length > 0 ? cpuArimaData[cpuArimaData.length - 1].value : null;
-  const forecastValues = [
-    ...cpuArimaData.slice(0, -1).map(() => null),  // 과거는 null
-    lastActualValue,  // 마지막 실제값 (연결점)
-    ...forecastHorizon.map(f => f.value),  // 미래 예측
-  ];
-  
-  // ARIMA Forecast vs Actual Chart (with future predictions)
+  // ARIMA Forecast vs Actual Chart (simple version)
   const arimaChartOption = {
-    title: { text: '📈 AutoARIMA 예측 (미래 포함)', left: 'center', textStyle: { fontSize: 14, color: '#e2e8f0' } },
-    tooltip: { 
-      trigger: 'axis',
-      formatter: (params: any) => {
-        let result = `${params[0]?.axisValue || ''}<br/>`;
-        params.forEach((p: any) => {
-          if (p.value !== null && p.value !== undefined) {
-            result += `${p.marker} ${p.seriesName}: ${Number(p.value).toFixed(2)}<br/>`;
-          }
-        });
-        return result;
-      }
-    },
-    legend: { bottom: 0, data: ['실제값 (과거)', '예측값', '위험 임계 (80%)', '심각 임계 (90%)'], textStyle: { color: '#94a3b8', fontSize: 10 } },
-    grid: { left: '10%', right: '5%', top: '18%', bottom: '18%' },
-    xAxis: { 
-      type: 'category', 
-      data: allLabels, 
-      axisLabel: { color: '#94a3b8', fontSize: 10, interval: 'auto' },
-      axisTick: { alignWithLabel: true },
-    },
-    yAxis: { 
-      type: 'value', 
-      name: '%', 
-      min: 0, 
-      max: 100, 
-      axisLabel: { color: '#94a3b8' }, 
-      nameTextStyle: { color: '#94a3b8' },
-      splitLine: { lineStyle: { color: '#334155' } },
-    },
+    title: { text: '📈 AutoARIMA 예측 vs 실제', left: 'center', textStyle: { fontSize: 14, color: '#e2e8f0' } },
+    tooltip: { trigger: 'axis' },
+    legend: { bottom: 0, data: ['실제값', '예측값', '잔차'], textStyle: { color: '#94a3b8' } },
+    grid: { left: '10%', right: '10%', top: '18%', bottom: '18%' },
+    xAxis: { type: 'category', data: cpuArimaData.map((_, i) => i + 1), axisLabel: { color: '#94a3b8' } },
+    yAxis: [
+      { type: 'value', name: 'Value', position: 'left', axisLabel: { color: '#94a3b8' }, nameTextStyle: { color: '#94a3b8' } },
+      { type: 'value', name: 'Residual', position: 'right', axisLabel: { color: '#94a3b8' }, nameTextStyle: { color: '#94a3b8' } },
+    ],
     series: [
       {
-        name: '실제값 (과거)',
+        name: '실제값',
         type: 'line',
-        data: actualValues,
+        data: cpuArimaData.map(d => d.value),
         itemStyle: { color: '#22c55e' },
-        lineStyle: { width: 2 },
         smooth: true,
-        connectNulls: false,
       },
       {
         name: '예측값',
         type: 'line',
-        data: forecastValues,
+        data: cpuArimaData.map(d => d.forecast),
         itemStyle: { color: '#8b5cf6' },
-        lineStyle: { type: 'dashed', width: 2 },
+        lineStyle: { type: 'dashed' },
         smooth: true,
-        symbol: 'circle',
-        symbolSize: (value: any, params: any) => params.dataIndex >= arimaData.length ? 10 : 4,
-        label: {
-          show: true,
-          formatter: (params: any) => params.dataIndex >= arimaData.length && params.value ? `${Number(params.value).toFixed(0)}%` : '',
-          color: '#c4b5fd',
-          fontSize: 10,
-          position: 'top',
+      },
+      {
+        name: '잔차',
+        type: 'bar',
+        yAxisIndex: 1,
+        data: cpuArimaData.map(d => d.residual),
+        itemStyle: { 
+          color: (params: any) => {
+            const threshold = cpuArimaData[params.dataIndex]?.threshold || 1;
+            return params.value > threshold ? '#ef4444' : '#64748b';
+          }
         },
       },
-      // Warning threshold line (80%)
-      {
-        name: '위험 임계 (80%)',
-        type: 'line',
-        data: allLabels.map(() => 80),
-        itemStyle: { color: '#f59e0b' },
-        lineStyle: { type: 'dotted', width: 1 },
-        symbol: 'none',
-      },
-      // Critical threshold line (90%)
-      {
-        name: '심각 임계 (90%)',
-        type: 'line',
-        data: allLabels.map(() => 90),
-        itemStyle: { color: '#ef4444' },
-        lineStyle: { type: 'dotted', width: 1 },
-        symbol: 'none',
-      },
     ],
-    // Mark area for future zone
-    visualMap: {
-      show: false,
-      pieces: [
-        { gte: 80, lte: 90, color: 'rgba(245, 158, 11, 0.3)' },
-        { gt: 90, color: 'rgba(239, 68, 68, 0.3)' },
-      ],
-    },
   };
 
   // All detections for table (exclude ensemble)
@@ -245,9 +179,8 @@ export function Dashboard() {
             borderRadius: '8px',
             backgroundColor: healthScore >= 80 ? '#14532d' : healthScore >= 50 ? '#713f12' : '#7f1d1d',
             fontSize: '18px',
-            fontWeight: 'bold',
           }}>
-            ❤️ {healthScore}
+            {healthScore >= 80 ? '💚' : healthScore >= 50 ? '💛' : '❤️'}
           </div>
           <span style={{
             display: 'flex',
