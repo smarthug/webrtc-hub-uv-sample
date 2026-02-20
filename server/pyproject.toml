@@ -1,13 +1,17 @@
 [project]
 name = "webrtc-hub-server"
-version = "0.1.1"
-description = "Python WebRTC hub server (aiortc) using DataChannels + HTTP signaling"
+version = "0.2.0"
+description = "Python WebRTC hub server (aiortc) using DataChannels + HTTP signaling + PulseAI anomaly detection"
 requires-python = ">=3.10"
 dependencies = [
   "aiohttp==3.13.2",
   "aiohttp-cors==0.8.1",
   "aiortc==1.14.0",
-
+  "pyod>=2.0.0",
+  "statsforecast>=1.7.0",
+  "pandas>=2.0.0",
+  "numpy>=1.24.0",
+  "click>=8.0.0",
 ]
 
 [project.scripts]

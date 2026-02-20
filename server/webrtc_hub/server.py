@@ -1,9 +1,16 @@
+"""
+PulseAI Lite - WebRTC Hub Server
+Supports both live WebRTC mode and sample file replay mode.
+"""
+
 import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, Set, Optional, Any
 
+import click
 from aiohttp import web
 import aiohttp_cors
 from aiortc import (
@@ -12,8 +19,9 @@ from aiortc import (
     RTCConfiguration,
     RTCIceServer,
 )
-from aiortc.contrib.media import MediaBlackhole  # not used, but keeps aiortc optional deps consistent
 
+from .detector import detector, AnomalyDetector
+from .sample_loader import sample_data_generator
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("webrtc-hub")
@@ -32,6 +40,9 @@ class Hub:
         self.channels: Dict[str, Any] = {}  # RTCDataChannel
         self.clients: Dict[str, ClientState] = {}
         self.room_members: Dict[str, Set[str]] = {}
+        self.mode: str = "live"
+        self.sample_file: Optional[Path] = None
+        self.sample_task: Optional[asyncio.Task] = None
 
     def _ensure_client(self, client_id: str) -> ClientState:
         if client_id not in self.clients:
@@ -83,12 +94,19 @@ class Hub:
                 n += 1
         return n
 
+    async def broadcast_all(self, msg: dict) -> int:
+        """Broadcast to all connected clients."""
+        n = 0
+        for cid in list(self.channels.keys()):
+            if await self.send_to(cid, msg):
+                n += 1
+        return n
+
 
 hub = Hub()
 
 
 def make_pc() -> RTCPeerConnection:
-    # STUN only for sample. Add TURN for restrictive networks.
     config = RTCConfiguration(
         iceServers=[
             RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
@@ -98,8 +116,38 @@ def make_pc() -> RTCPeerConnection:
     return RTCPeerConnection(configuration=config)
 
 
+def process_data(data: dict) -> dict:
+    """Process incoming data through anomaly detector and return result."""
+    result = detector.detect(data)
+    return detector.to_dict(result)
+
+
+async def run_sample_mode(file_path: Path) -> None:
+    """Run in sample mode, replaying data from file."""
+    log.info(f"Starting sample mode with file: {file_path}")
+    
+    async for data in sample_data_generator(file_path, loop=True):
+        # Process through detector
+        result = process_data(data)
+        
+        # Broadcast to all connected clients
+        if hub.channels:
+            await hub.broadcast_all(result)
+            
+            # Also send raw metrics for charting
+            metrics_msg = {
+                "type": "metrics",
+                "agent_id": data.get("AgentId", "unknown"),
+                "timestamp": data.get("Timestamp", ""),
+                "cpu": data.get("CPU", 0),
+                "memory": data.get("Memory", 0),
+                "disk_io": data.get("DiskIO", 0),
+                "network": data.get("Network", {}),
+            }
+            await hub.broadcast_all(metrics_msg)
+
+
 async def offer(request: web.Request) -> web.Response:
-    # client_id is required to make the hub deterministic.
     client_id = request.query.get("client_id")
     role = request.query.get("role", "unknown")
     if not client_id:
@@ -109,7 +157,6 @@ async def offer(request: web.Request) -> web.Response:
     sdp = params["sdp"]
     type_ = params["type"]
 
-    # If the client reconnects with same ID, drop previous connection.
     if client_id in hub.pcs:
         log.info("Replacing existing connection for client_id=%s", client_id)
         hub.disconnect(client_id)
@@ -123,12 +170,14 @@ async def offer(request: web.Request) -> web.Response:
 
     @pc.on("datachannel")
     def on_datachannel(channel):
-        # Expect the client to create the datachannel (offerer).
         hub.channels[client_id] = channel
-        log.info("DataChannel open request: client_id=%s label=%s", client_id, channel.label)
+        log.info("DataChannel open: client_id=%s label=%s", client_id, channel.label)
 
-        # Tell client it's registered
-        channel.send(json.dumps({"type": "welcome", "client_id": client_id}, ensure_ascii=False))
+        # Send welcome message
+        channel.send(json.dumps({"type": "welcome", "client_id": client_id, "mode": hub.mode}, ensure_ascii=False))
+        
+        # Auto-join the "pulseai" room for broadcasts
+        hub._add_to_room(client_id, "pulseai")
 
         @channel.on("message")
         def on_message(message):
@@ -137,14 +186,8 @@ async def offer(request: web.Request) -> web.Response:
             except Exception:
                 data = {"type": "text", "payload": str(message)}
 
-            # Protocol:
-            # - hello: {type:"hello", role, meta}
-            # - join: {type:"join", room}
-            # - leave: {type:"leave", room}
-            # - send: {type:"send", to, payload}
-            # - broadcast: {type:"broadcast", room, payload}
-            # - ping: {type:"ping", ts}
             t = data.get("type")
+            
             if t == "hello":
                 st.role = data.get("role", st.role)
                 channel.send(json.dumps({"type": "hello_ack", "role": st.role}, ensure_ascii=False))
@@ -192,12 +235,33 @@ async def offer(request: web.Request) -> web.Response:
                 return
 
             if t == "data":
-                # Log client payloads sent to the hub.
-                log.info("recv data client_id=%s payload=%s", client_id, data.get("payload"))
+                # Process POS data through detector (live mode)
+                if hub.mode == "live":
+                    payload = data.get("payload", {})
+                    result = process_data(payload)
+                    
+                    # Send back to sender
+                    channel.send(json.dumps(result, ensure_ascii=False))
+                    
+                    # Broadcast to room
+                    asyncio.create_task(hub.broadcast_room("pulseai", result, exclude=client_id))
+                    
+                    # Also broadcast raw metrics
+                    metrics_msg = {
+                        "type": "metrics",
+                        "agent_id": payload.get("AgentId", "unknown"),
+                        "timestamp": payload.get("Timestamp", ""),
+                        "cpu": payload.get("CPU", 0),
+                        "memory": payload.get("Memory", 0),
+                        "disk_io": payload.get("DiskIO", 0),
+                        "network": payload.get("Network", {}),
+                    }
+                    asyncio.create_task(hub.broadcast_room("pulseai", metrics_msg, exclude=client_id))
+                
                 channel.send(json.dumps({"type": "data_ack", "ts": data.get("ts")}, ensure_ascii=False))
                 return
 
-            # default: echo for debugging
+            # Default: echo
             channel.send(json.dumps({"type": "echo", "payload": data}, ensure_ascii=False))
 
     @pc.on("connectionstatechange")
@@ -215,7 +279,6 @@ async def offer(request: web.Request) -> web.Response:
 
 
 async def who(request: web.Request) -> web.Response:
-    # simple debug endpoint
     online = []
     for cid, st in hub.clients.items():
         online.append({
@@ -224,14 +287,26 @@ async def who(request: web.Request) -> web.Response:
             "rooms": sorted(list(st.rooms)),
             "online": hub.is_online(cid),
         })
-    return web.json_response({"clients": online, "rooms": {k: sorted(list(v)) for k, v in hub.room_members.items()}})
+    return web.json_response({
+        "clients": online,
+        "rooms": {k: sorted(list(v)) for k, v in hub.room_members.items()},
+        "mode": hub.mode,
+    })
 
 
 async def health(request: web.Request) -> web.Response:
-    return web.json_response({"ok": True})
+    return web.json_response({"ok": True, "mode": hub.mode})
 
 
 async def on_shutdown(app: web.Application):
+    # Cancel sample task if running
+    if hub.sample_task:
+        hub.sample_task.cancel()
+        try:
+            await hub.sample_task
+        except asyncio.CancelledError:
+            pass
+    
     # Close all peer connections
     coros = []
     for cid, pc in list(hub.pcs.items()):
@@ -243,14 +318,25 @@ async def on_shutdown(app: web.Application):
     hub.room_members.clear()
 
 
-def create_app() -> web.Application:
+async def on_startup(app: web.Application):
+    """Start background tasks."""
+    if hub.mode == "sample" and hub.sample_file:
+        hub.sample_task = asyncio.create_task(run_sample_mode(hub.sample_file))
+
+
+def create_app(mode: str = "live", sample_file: Optional[str] = None) -> web.Application:
+    hub.mode = mode
+    if sample_file:
+        hub.sample_file = Path(sample_file)
+    
     app = web.Application()
     app.router.add_get("/health", health)
     app.router.add_get("/who", who)
     app.router.add_post("/offer", offer)
+    app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
 
-    # Allow browser-based clients to hit the signaling endpoints during dev/testing.
+    # CORS for browser clients
     cors = aiohttp_cors.setup(
         app,
         defaults={
@@ -266,8 +352,23 @@ def create_app() -> web.Application:
     return app
 
 
-def main() -> None:
-    web.run_app(create_app(), host="0.0.0.0", port=8080)
+@click.command()
+@click.option("--mode", type=click.Choice(["live", "sample"]), default="live", help="Run mode")
+@click.option("--file", "sample_file", type=click.Path(), default=None, help="Sample file path (for sample mode)")
+@click.option("--host", default="0.0.0.0", help="Host to bind")
+@click.option("--port", default=8080, type=int, help="Port to bind")
+def main(mode: str, sample_file: Optional[str], host: str, port: int) -> None:
+    """PulseAI Lite - WebRTC Hub Server"""
+    
+    if mode == "sample" and not sample_file:
+        raise click.UsageError("--file is required when using --mode sample")
+    
+    log.info(f"Starting PulseAI Hub in {mode} mode")
+    if sample_file:
+        log.info(f"Sample file: {sample_file}")
+    
+    app = create_app(mode=mode, sample_file=sample_file)
+    web.run_app(app, host=host, port=port)
 
 
 if __name__ == "__main__":
