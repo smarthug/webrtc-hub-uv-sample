@@ -559,6 +559,15 @@ def batch_arima_forecast(data_list: List[dict], forecast_hours: int = 2) -> dict
         log.warning(f"Not enough data for ARIMA: {len(data_list)} < {MIN_SAMPLES_ARIMA}")
         return {"cpu": [], "memory": [], "error": "Not enough data"}
     
+    # Sample data if too large (keep last 500 points for speed)
+    max_samples = 500
+    if len(data_list) > max_samples:
+        # Take evenly spaced samples + last 100 points
+        step = len(data_list) // (max_samples - 100)
+        sampled = data_list[::step][:max_samples - 100] + data_list[-100:]
+        log.info(f"Sampled {len(data_list)} -> {len(sampled)} records for ARIMA")
+        data_list = sampled
+    
     log.info(f"Running batch ARIMA forecast on {len(data_list)} records...")
     
     # Extract metrics
@@ -566,8 +575,8 @@ def batch_arima_forecast(data_list: List[dict], forecast_hours: int = 2) -> dict
     memory_values = [d.get("Memory", 0) for d in data_list]
     
     # Calculate forecast horizon (assuming 5s intervals)
-    # forecast_hours * 60 minutes * 12 points/minute = total points
-    horizon = forecast_hours * 60 * 12
+    # Limit to 360 points (30 minutes) for speed, extrapolate the rest
+    horizon = 360  # 30 minutes max for actual ARIMA prediction
     
     result = {"cpu": [], "memory": []}
     
@@ -593,18 +602,26 @@ def batch_arima_forecast(data_list: List[dict], forecast_hours: int = 2) -> dict
             forecast_df = sf.predict(h=horizon)
             forecasts = forecast_df["AutoARIMA"].values
             
-            # Sample at 10min, 30min, 1hr, 2hr intervals
+            # Sample at 10min, 30min intervals (actual), extrapolate 1hr, 2hr
+            last_forecast = float(forecasts[-1])
+            trend = (last_forecast - float(arr[-1])) / 30  # trend per minute
+            
             sample_points = [
-                {"minutes": 10, "index": 10 * 12},
-                {"minutes": 30, "index": 30 * 12},
-                {"minutes": 60, "index": 60 * 12},
-                {"minutes": 120, "index": 120 * 12},
+                {"minutes": 10, "index": 10 * 12, "extrapolate": False},
+                {"minutes": 30, "index": 30 * 12 - 1, "extrapolate": False},
+                {"minutes": 60, "index": None, "extrapolate": True},
+                {"minutes": 120, "index": None, "extrapolate": True},
             ]
             
             metric_forecasts = []
             for point in sample_points:
-                idx = min(point["index"] - 1, len(forecasts) - 1)
-                value = float(forecasts[idx])
+                if point["extrapolate"]:
+                    # Extrapolate using trend
+                    value = last_forecast + trend * (point["minutes"] - 30)
+                    value = max(0, min(100, value))  # Clamp to 0-100
+                else:
+                    idx = min(point["index"], len(forecasts) - 1)
+                    value = float(forecasts[idx])
                 
                 # Determine severity
                 warning_threshold = 80.0 if metric_name == "cpu" else 85.0
