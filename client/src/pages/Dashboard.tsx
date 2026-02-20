@@ -28,13 +28,14 @@ export function Dashboard() {
     role: 'viewer',
   });
 
-  // Auto-connect on mount
+  // Auto-connect on mount (empty deps to run once)
   useEffect(() => {
     connect();
     return () => {
       disconnect();
     };
-  }, [connect, disconnect]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const latestAgentId = metrics.length > 0 ? metrics[metrics.length - 1].agent_id : undefined;
 
