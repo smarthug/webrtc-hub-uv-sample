@@ -142,8 +142,9 @@ def process_data(data: dict) -> dict:
         _last_ecod_time[agent_id] = now
         for metric_name, values in [("CPU", buf.cpu), ("Memory", buf.memory), ("DiskIO", buf.disk_io)]:
             result = detector._run_ecod(agent_id, metric_name, values)
-            if result and result.severity != "normal":
-                detections.append(result)
+            if result:
+                detections.append(result)  # Include ALL results, not just anomalies
+                log.info(f"ECOD {metric_name}: score={result.score:.3f}, severity={result.severity}")
     
     # AutoARIMA: every 60 seconds
     last_arima = _last_arima_time.get(agent_id, 0)
@@ -151,8 +152,9 @@ def process_data(data: dict) -> dict:
         _last_arima_time[agent_id] = now
         for metric_name, values in [("CPU", buf.cpu), ("Memory", buf.memory)]:
             result = detector._run_arima(agent_id, metric_name, values)
-            if result and result.severity != "normal":
-                detections.append(result)
+            if result:
+                detections.append(result)  # Include ALL results
+                log.info(f"ARIMA {metric_name}: value={result.value:.2f}, forecast={result.forecast:.2f}, residual={result.residual:.2f}")
     
     # Calculate health score
     health_score = 100
