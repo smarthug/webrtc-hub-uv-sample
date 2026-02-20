@@ -3,6 +3,7 @@ import { useWebRTC } from '../hooks/useWebRTC';
 import ReactECharts from 'echarts-for-react';
 import { PeripheralCards } from '../components/PeripheralCards';
 import { StatusInsightCard } from '../components/StatusInsightCard';
+import { PredictionHeatmap } from '../components/PredictionHeatmap';
 
 function generateClientId(): string {
   return `viewer-${Math.random().toString(36).substring(2, 8)}`;
@@ -43,16 +44,17 @@ export function Dashboard() {
     .flatMap(a => a.detections?.filter(d => d.engine === 'arima') || [])
     .slice(-50);
 
-  const ensembleData = anomalies
-    .flatMap(a => a.detections?.filter(d => d.engine === 'ensemble') || [])
-    .slice(-50);
-
   const peripheralAlerts = anomalies
     .flatMap(a => a.detections?.filter(d => d.engine === 'peripheral') || [])
     .slice(-20);
 
-  // Latest ensemble score
-  const latestEnsemble = ensembleData.length > 0 ? ensembleData[ensembleData.length - 1] : null;
+  // Get CPU and Memory ARIMA data separately
+  const cpuArimaData = arimaData.filter(d => d.metric === 'CPU');
+  const memArimaData = arimaData.filter(d => d.metric === 'Memory');
+  
+  // Latest forecasts for heatmap
+  const latestCpuArima = cpuArimaData.length > 0 ? cpuArimaData[cpuArimaData.length - 1] : null;
+  const latestMemArima = memArimaData.length > 0 ? memArimaData[memArimaData.length - 1] : null;
 
   // ECOD Multivariate Score Chart
   const ecodChartOption = {
@@ -96,18 +98,25 @@ export function Dashboard() {
     ],
   };
 
-  // Get latest ARIMA forecast horizon for future predictions
-  const latestArima = arimaData.length > 0 ? arimaData[arimaData.length - 1] : null;
-  const forecastHorizon = latestArima?.forecast_horizon || [];
+  // Get latest ARIMA forecast horizon for future predictions (use CPU data)
+  const forecastHorizon = latestCpuArima?.forecast_horizon || [];
   
   // Build X-axis labels: past data + future predictions
-  const pastLabels = arimaData.map((_, i) => `${i + 1}`);
+  const pastLabels = cpuArimaData.map((_, i) => `${i + 1}`);
   const futureLabels = forecastHorizon.map(f => `+${f.minutes}분`);
   const allLabels = [...pastLabels, ...futureLabels];
   
   // Build series data with future predictions
-  const actualValues = [...arimaData.map(d => d.value), ...forecastHorizon.map(() => null)];
-  const forecastValues = [...arimaData.map(d => d.forecast), ...forecastHorizon.map(f => f.value)];
+  // 실제값: 과거 데이터만
+  const actualValues = [...cpuArimaData.map(d => d.value), ...forecastHorizon.map(() => null)];
+  
+  // 예측값: 마지막 실제값부터 시작해서 미래까지 연결
+  const lastActualValue = cpuArimaData.length > 0 ? cpuArimaData[cpuArimaData.length - 1].value : null;
+  const forecastValues = [
+    ...cpuArimaData.slice(0, -1).map(() => null),  // 과거는 null
+    lastActualValue,  // 마지막 실제값 (연결점)
+    ...forecastHorizon.map(f => f.value),  // 미래 예측
+  ];
   
   // ARIMA Forecast vs Actual Chart (with future predictions)
   const arimaChartOption = {
@@ -197,42 +206,7 @@ export function Dashboard() {
     },
   };
 
-  // Ensemble Score Gauge
-  const ensembleGaugeOption = {
-    series: [{
-      type: 'gauge',
-      startAngle: 180,
-      endAngle: 0,
-      min: 0,
-      max: 1,
-      splitNumber: 5,
-      itemStyle: {
-        color: latestEnsemble ? 
-          (latestEnsemble.score > 0.7 ? '#ef4444' : latestEnsemble.score > 0.4 ? '#f59e0b' : '#22c55e') 
-          : '#64748b',
-      },
-      pointer: { width: 4 },
-      axisLine: {
-        lineStyle: {
-          width: 15,
-          color: [[0.3, '#22c55e'], [0.6, '#f59e0b'], [1, '#ef4444']],
-        },
-      },
-      axisTick: { show: false },
-      splitLine: { show: false },
-      axisLabel: { show: false },
-      detail: {
-        valueAnimation: true,
-        formatter: (val: number) => `${(val * 100).toFixed(0)}%`,
-        fontSize: 24,
-        color: '#e2e8f0',
-        offsetCenter: [0, '20%'],
-      },
-      data: [{ value: latestEnsemble?.score || 0 }],
-    }],
-  };
-
-  // All detections for table
+  // All detections for table (exclude ensemble)
   const allDetections = anomalies
     .flatMap(a => (a.detections || []).map(d => ({ ...d, timestamp: a.timestamp })))
     .slice(-30)
@@ -253,7 +227,7 @@ export function Dashboard() {
         <div>
           <h1 style={{ margin: 0, fontSize: '24px' }}>🧠 PulseAI Lite v2.0</h1>
           <p style={{ margin: '4px 0 0', fontSize: '14px', color: '#94a3b8' }}>
-            다변량 ECOD + 캐시드 AutoARIMA + 앙상블 탐지
+            다변량 ECOD 이상탐지 + AutoARIMA 미래예측
           </p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
@@ -293,11 +267,10 @@ export function Dashboard() {
       </header>
 
       {/* Stats Row */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '16px', marginBottom: '20px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px', marginBottom: '20px' }}>
         <StatCard title="수신 데이터" value={metrics.length} icon="📊" />
         <StatCard title="ECOD 분석" value={ecodData.filter(d => d.metric === 'Multivariate').length} icon="🔍" color="#f43f5e" />
         <StatCard title="ARIMA 예측" value={arimaData.length} icon="📈" color="#8b5cf6" />
-        <StatCard title="앙상블" value={ensembleData.length} icon="🎯" color="#06b6d4" />
         <StatCard title="주변장치 경고" value={peripheralAlerts.length} icon="⚠️" color="#f59e0b" />
       </div>
 
@@ -313,10 +286,18 @@ export function Dashboard() {
         />
       </div>
 
-      {/* Charts Row 2 */}
+      {/* Charts Row 2 - ARIMA */}
       <div style={{ backgroundColor: '#1e293b', borderRadius: '12px', padding: '16px', marginBottom: '20px' }}>
         <ReactECharts option={arimaChartOption} style={{ height: '280px' }} />
       </div>
+
+      {/* Prediction Heatmap Timeline */}
+      <PredictionHeatmap
+        cpuForecasts={latestCpuArima?.forecast_horizon || []}
+        memoryForecasts={latestMemArima?.forecast_horizon || []}
+        currentCpu={latestCpuArima?.value || 0}
+        currentMemory={latestMemArima?.value || 0}
+      />
 
       {/* Peripheral Status Cards */}
       <PeripheralCards alerts={peripheralAlerts} />
