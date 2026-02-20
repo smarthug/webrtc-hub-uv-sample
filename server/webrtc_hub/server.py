@@ -116,10 +116,79 @@ def make_pc() -> RTCPeerConnection:
     return RTCPeerConnection(configuration=config)
 
 
+# Time-based detection rate limiting
+import time
+_last_ecod_time: dict = {}
+_last_arima_time: dict = {}
+ECOD_INTERVAL = 10.0    # ECOD every 10 seconds
+ARIMA_INTERVAL = 60.0   # AutoARIMA every 60 seconds
+
+
 def process_data(data: dict) -> dict:
     """Process incoming data through anomaly detector and return result."""
-    result = detector.detect(data)
-    return detector.to_dict(result)
+    agent_id = data.get("AgentId", "unknown")
+    now = time.time()
+    
+    # Always update buffer
+    detector._ensure_buffer(agent_id)
+    detector._update_buffer(agent_id, data)
+    
+    detections = []
+    buf = detector.buffers.get(agent_id)
+    
+    # ECOD: every 10 seconds
+    last_ecod = _last_ecod_time.get(agent_id, 0)
+    if now - last_ecod >= ECOD_INTERVAL and buf and len(buf.cpu) >= 20:
+        _last_ecod_time[agent_id] = now
+        for metric_name, values in [("CPU", buf.cpu), ("Memory", buf.memory), ("DiskIO", buf.disk_io)]:
+            result = detector._run_ecod(agent_id, metric_name, values)
+            if result and result.severity != "normal":
+                detections.append(result)
+    
+    # AutoARIMA: every 60 seconds
+    last_arima = _last_arima_time.get(agent_id, 0)
+    if now - last_arima >= ARIMA_INTERVAL and buf and len(buf.cpu) >= 30:
+        _last_arima_time[agent_id] = now
+        for metric_name, values in [("CPU", buf.cpu), ("Memory", buf.memory)]:
+            result = detector._run_arima(agent_id, metric_name, values)
+            if result and result.severity != "normal":
+                detections.append(result)
+    
+    # Calculate health score
+    health_score = 100
+    for d in detections:
+        if d.severity == "critical":
+            health_score -= 20
+        elif d.severity == "warning":
+            health_score -= 10
+    health_score = max(0, health_score)
+    
+    return {
+        "type": "anomaly" if detections else "metrics",
+        "agent_id": agent_id,
+        "timestamp": data.get("Timestamp", ""),
+        "detections": [
+            {
+                "engine": d.engine,
+                "metric": d.metric,
+                "value": d.value,
+                "score": d.score,
+                "threshold": d.threshold,
+                "forecast": d.forecast,
+                "residual": d.residual,
+                "severity": d.severity,
+            }
+            for d in detections
+        ],
+        "health_score": health_score,
+        "raw_metrics": {
+            "CPU": data.get("CPU", 0),
+            "Memory": data.get("Memory", 0),
+            "DiskIO": data.get("DiskIO", 0),
+            "NetworkSent": data.get("Network", {}).get("Sent", 0),
+            "NetworkRecv": data.get("Network", {}).get("Recv", 0),
+        },
+    }
 
 
 async def run_sample_mode(file_path: Path) -> None:

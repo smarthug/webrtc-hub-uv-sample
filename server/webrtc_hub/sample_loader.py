@@ -61,11 +61,13 @@ async def load_sample_file(
                         
                         # Calculate delay based on timestamp difference
                         if prev_ts is not None:
-                            delay = (current_ts - prev_ts).total_seconds()
-                            if delay > 0:
-                                # Cap delay at 10 seconds to avoid long waits
-                                delay = min(delay, 10.0)
-                                await asyncio.sleep(delay)
+                            delay = abs(current_ts - prev_ts).total_seconds()
+                            # Use absolute value and ensure minimum delay
+                            delay = max(0.1, min(delay, 5.0))  # 0.1s ~ 5s
+                            await asyncio.sleep(delay)
+                        else:
+                            # First record - small delay
+                            await asyncio.sleep(0.1)
                         
                         prev_ts = current_ts
                     except ValueError:
@@ -130,10 +132,13 @@ async def sample_data_generator(
                         
                         # Calculate delay based on timestamp difference
                         if prev_ts is not None:
-                            delay = (current_ts - prev_ts).total_seconds()
-                            if delay > 0:
-                                delay = min(delay, 10.0)
-                                await asyncio.sleep(delay)
+                            delay = abs(current_ts - prev_ts).total_seconds()
+                            # Use absolute value and ensure minimum delay
+                            delay = max(0.1, min(delay, 5.0))  # 0.1s ~ 5s
+                            await asyncio.sleep(delay)
+                        else:
+                            # First record - small delay
+                            await asyncio.sleep(0.1)
                         
                         prev_ts = current_ts
                     except ValueError:
