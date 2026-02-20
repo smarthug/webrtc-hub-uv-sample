@@ -7,12 +7,42 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import AsyncIterator, Callable
+from typing import AsyncIterator, Callable, List
 
 log = logging.getLogger("sample-loader")
 
 # Configurable delay between records (seconds)
 SAMPLE_DELAY = 0.5  # 0.5s = 2 records per second
+
+
+def load_all_sample_data(file_path: Path) -> List[dict]:
+    """
+    Load all sample data at once for batch processing.
+    
+    Args:
+        file_path: Path to data_pos.txt
+        
+    Returns:
+        List of all data points
+    """
+    if not file_path.exists():
+        log.error(f"Sample file not found: {file_path}")
+        return []
+    
+    data_list = []
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                data_list.append(data)
+            except json.JSONDecodeError:
+                continue
+    
+    log.info(f"Loaded {len(data_list)} records from {file_path}")
+    return data_list
 
 
 async def load_sample_file(

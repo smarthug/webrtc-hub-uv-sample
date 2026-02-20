@@ -542,3 +542,96 @@ class EnhancedAnomalyDetector:
 
 # Global detector instance
 detector = EnhancedAnomalyDetector()
+
+
+def batch_arima_forecast(data_list: List[dict], forecast_hours: int = 2) -> dict:
+    """
+    Run ARIMA on entire sample data and generate future forecast.
+    
+    Args:
+        data_list: List of all sample data points
+        forecast_hours: Hours to forecast into future
+        
+    Returns:
+        dict with CPU and Memory forecasts
+    """
+    if len(data_list) < MIN_SAMPLES_ARIMA:
+        log.warning(f"Not enough data for ARIMA: {len(data_list)} < {MIN_SAMPLES_ARIMA}")
+        return {"cpu": [], "memory": [], "error": "Not enough data"}
+    
+    log.info(f"Running batch ARIMA forecast on {len(data_list)} records...")
+    
+    # Extract metrics
+    cpu_values = [d.get("CPU", 0) for d in data_list]
+    memory_values = [d.get("Memory", 0) for d in data_list]
+    
+    # Calculate forecast horizon (assuming 5s intervals)
+    # forecast_hours * 60 minutes * 12 points/minute = total points
+    horizon = forecast_hours * 60 * 12
+    
+    result = {"cpu": [], "memory": []}
+    
+    for metric_name, values in [("cpu", cpu_values), ("memory", memory_values)]:
+        try:
+            arr = np.array(values)
+            
+            # Prepare data for StatsForecast
+            df = pd.DataFrame({
+                "unique_id": "batch",
+                "ds": pd.date_range(end=pd.Timestamp.now(), periods=len(arr), freq="5s"),
+                "y": arr,
+            })
+            
+            # Train model
+            sf = StatsForecast(
+                models=[AutoARIMA(season_length=ARIMA_SEASON_LENGTH)],
+                freq="5s",
+            )
+            sf.fit(df)
+            
+            # Forecast
+            forecast_df = sf.predict(h=horizon)
+            forecasts = forecast_df["AutoARIMA"].values
+            
+            # Sample at 10min, 30min, 1hr, 2hr intervals
+            sample_points = [
+                {"minutes": 10, "index": 10 * 12},
+                {"minutes": 30, "index": 30 * 12},
+                {"minutes": 60, "index": 60 * 12},
+                {"minutes": 120, "index": 120 * 12},
+            ]
+            
+            metric_forecasts = []
+            for point in sample_points:
+                idx = min(point["index"] - 1, len(forecasts) - 1)
+                value = float(forecasts[idx])
+                
+                # Determine severity
+                warning_threshold = 80.0 if metric_name == "cpu" else 85.0
+                critical_threshold = 90.0 if metric_name == "cpu" else 95.0
+                
+                if value >= critical_threshold:
+                    severity = "critical"
+                elif value >= warning_threshold:
+                    severity = "warning"
+                else:
+                    severity = "normal"
+                
+                metric_forecasts.append({
+                    "minutes": point["minutes"],
+                    "value": round(value, 2),
+                    "severity": severity,
+                })
+            
+            result[metric_name] = metric_forecasts
+            log.info(f"ARIMA {metric_name} forecast: {metric_forecasts}")
+            
+        except Exception as e:
+            log.error(f"Batch ARIMA failed for {metric_name}: {e}")
+            result[metric_name] = []
+    
+    # Add current values (last data point)
+    result["current_cpu"] = round(cpu_values[-1], 2) if cpu_values else 0
+    result["current_memory"] = round(memory_values[-1], 2) if memory_values else 0
+    
+    return result

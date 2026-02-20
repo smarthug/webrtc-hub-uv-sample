@@ -39,12 +39,20 @@ interface AnomalyData {
 
 type MessageData = MetricsData | AnomalyData | { type: string; [key: string]: any };
 
+interface BatchForecast {
+  cpu: Array<{ minutes: number; value: number; severity: string }>;
+  memory: Array<{ minutes: number; value: number; severity: string }>;
+  current_cpu: number;
+  current_memory: number;
+}
+
 export function useWebRTC(config: WebRTCConfig) {
   const [connected, setConnected] = useState(false);
   const [mode, setMode] = useState<string>('unknown');
   const [metrics, setMetrics] = useState<MetricsData[]>([]);
   const [anomalies, setAnomalies] = useState<AnomalyData[]>([]);
   const [healthScore, setHealthScore] = useState(100);
+  const [batchForecast, setBatchForecast] = useState<BatchForecast | null>(null);
   
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const channelRef = useRef<RTCDataChannel | null>(null);
@@ -82,6 +90,11 @@ export function useWebRTC(config: WebRTCConfig) {
         
         if (data.type === 'welcome') {
           setMode(data.mode || 'unknown');
+          // Store batch forecast from server
+          if (data.batch_forecast) {
+            setBatchForecast(data.batch_forecast);
+            console.log('Received batch forecast:', data.batch_forecast);
+          }
         } else if (data.type === 'metrics' || data.type === 'anomaly') {
           // Extract metrics from raw_metrics if present
           const rawMetrics = data.raw_metrics || {};
@@ -188,6 +201,7 @@ export function useWebRTC(config: WebRTCConfig) {
     metrics,
     anomalies,
     healthScore,
+    batchForecast,
     connect,
     disconnect,
     sendMessage,

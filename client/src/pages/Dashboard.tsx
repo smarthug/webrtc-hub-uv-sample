@@ -19,6 +19,7 @@ export function Dashboard() {
     metrics,
     anomalies,
     healthScore,
+    batchForecast,
     connect,
     disconnect,
   } = useWebRTC({
@@ -224,12 +225,12 @@ export function Dashboard() {
         <ReactECharts option={arimaChartOption} style={{ height: '280px' }} />
       </div>
 
-      {/* Prediction Heatmap Timeline */}
+      {/* Prediction Heatmap Timeline (from batch forecast) */}
       <PredictionHeatmap
-        cpuForecasts={latestCpuArima?.forecast_horizon || []}
-        memoryForecasts={latestMemArima?.forecast_horizon || []}
-        currentCpu={latestCpuArima?.value || 0}
-        currentMemory={latestMemArima?.value || 0}
+        cpuForecasts={batchForecast?.cpu || []}
+        memoryForecasts={batchForecast?.memory || []}
+        currentCpu={batchForecast?.current_cpu || latestCpuArima?.value || 0}
+        currentMemory={batchForecast?.current_memory || latestMemArima?.value || 0}
       />
 
       {/* Peripheral Status Cards */}

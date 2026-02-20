@@ -20,8 +20,8 @@ from aiortc import (
     RTCIceServer,
 )
 
-from .detector import detector, EnhancedAnomalyDetector
-from .sample_loader import sample_data_generator
+from .detector import detector, EnhancedAnomalyDetector, batch_arima_forecast
+from .sample_loader import sample_data_generator, load_all_sample_data
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("webrtc-hub")
@@ -43,6 +43,7 @@ class Hub:
         self.mode: str = "live"
         self.sample_file: Optional[Path] = None
         self.sample_task: Optional[asyncio.Task] = None
+        self.batch_forecast: Optional[Dict] = None  # Pre-computed ARIMA forecast
 
     def _ensure_client(self, client_id: str) -> ClientState:
         if client_id not in self.clients:
@@ -160,9 +161,23 @@ def process_data(data: dict) -> dict:
     return detector.to_dict(result)
 
 
+def compute_batch_forecast(file_path: Path) -> None:
+    """Pre-compute ARIMA forecast from entire sample data."""
+    log.info(f"Computing batch ARIMA forecast from {file_path}...")
+    all_data = load_all_sample_data(file_path)
+    if all_data:
+        hub.batch_forecast = batch_arima_forecast(all_data, forecast_hours=2)
+        log.info(f"Batch forecast ready: CPU={hub.batch_forecast.get('cpu')}, Memory={hub.batch_forecast.get('memory')}")
+    else:
+        log.warning("No data loaded for batch forecast")
+
+
 async def run_sample_mode(file_path: Path) -> None:
     """Run in sample mode, replaying data from file."""
     log.info(f"Starting sample mode with file: {file_path}")
+    
+    # Pre-compute batch forecast
+    compute_batch_forecast(file_path)
     
     async for data in sample_data_generator(file_path, loop=True):
         # Process through detector
@@ -211,8 +226,14 @@ async def offer(request: web.Request) -> web.Response:
         hub.channels[client_id] = channel
         log.info("DataChannel open: client_id=%s label=%s", client_id, channel.label)
 
-        # Send welcome message
-        channel.send(json.dumps({"type": "welcome", "client_id": client_id, "mode": hub.mode}, ensure_ascii=False))
+        # Send welcome message with batch forecast
+        welcome_msg = {
+            "type": "welcome", 
+            "client_id": client_id, 
+            "mode": hub.mode,
+            "batch_forecast": hub.batch_forecast,  # Pre-computed ARIMA forecast
+        }
+        channel.send(json.dumps(welcome_msg, ensure_ascii=False))
         
         # Auto-join the "pulseai" room for broadcasts
         hub._add_to_room(client_id, "pulseai")
