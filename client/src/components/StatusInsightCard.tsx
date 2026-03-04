@@ -136,7 +136,7 @@ export function StatusInsightCard({ detections, healthScore }: Props) {
         <h3 style={{ margin: 0, fontSize: '14px', color: '#94a3b8' }}>
           🎯 시스템 상태 분석
         </h3>
-        <div style={{
+        {/* <div style={{
           padding: '4px 12px',
           borderRadius: '12px',
           backgroundColor: healthScore >= 80 ? '#14532d' : healthScore >= 50 ? '#713f12' : '#7f1d1d',
@@ -144,7 +144,7 @@ export function StatusInsightCard({ detections, healthScore }: Props) {
           fontWeight: 'bold',
         }}>
           ❤️ {healthScore}
-        </div>
+        </div> */}
       </div>
 
       {/* ECOD Current Status */}

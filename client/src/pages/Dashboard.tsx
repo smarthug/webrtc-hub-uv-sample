@@ -175,14 +175,14 @@ export function Dashboard() {
           }}>
             {mode === 'sample' ? '📁 Sample' : '🔴 Live'}
           </span>
-          <div style={{
+          {/* <div style={{
             padding: '8px 16px',
             borderRadius: '8px',
             backgroundColor: healthScore >= 80 ? '#14532d' : healthScore >= 50 ? '#713f12' : '#7f1d1d',
             fontSize: '18px',
           }}>
             {healthScore >= 80 ? '💚' : healthScore >= 50 ? '💛' : '❤️'}
-          </div>
+          </div> */}
           <span style={{
             display: 'flex',
             alignItems: 'center',
